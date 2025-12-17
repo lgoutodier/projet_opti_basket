@@ -1,1 +1,77 @@
+import pulp
+import numpy as np
+import pandas as pd
+import random
+import math
+import time
 
+
+def generate_data(num_teams):
+    us_cities = [
+        "New York", "Los Angeles", "Chicago", "Houston", "Phoenix",
+        "Philadelphia", "San Antonio", "San Diego", "Dallas", "San Jose"
+    ]
+
+    teams = us_cities[:num_teams]
+
+    # On génère des coords aléatoires sur une grille 1000x1000 pour simplifier le calcul de distance
+    coords = {city: (random.randint(0, 1000), random.randint(0, 1000)) for city in teams}
+
+    # Matrice de distance
+    dist_matrix = {}
+    for t1 in teams:
+        dist_matrix[t1] = {}
+        for t2 in teams:
+            if t1 == t2:
+                dist_matrix[t1][t2] = 0
+            else:
+                x1, y1 = coords[t1]
+                x2, y2 = coords[t2]
+                d = int(math.sqrt((x1-x2)**2 + (y1 - y2)**2))
+                dist_matrix[t1][t2] = d
+
+    return teams, dist_matrix
+
+
+
+def calculate_total_travel(schedule, teams, dist_matrix):
+    total_distance = 0
+
+    # On suit chaque équipe tour par tour
+    for team in teams:
+        current_location = team # Au début, l'équipe est à la maison
+        team_dist = 0
+
+        for r, matches in enumerate(schedule):
+            # Trouver où joue l'équipe 'team' ce round
+            match = None
+            is_home = False
+
+            for (h, a) in matches:
+                if h == team:
+                    match = h # Joue à domicile (ville h)
+                    is_home = True
+                    break
+                elif a == team:
+                    match = a # Joue à l'extérieur (ville a)
+                    is_home = False
+                    break
+
+            # Calcul du trajet
+            destination = match # La ville où se joue le match
+            d = dist_matrix[current_location][destination]
+            team_dist += d
+            current_location = destination
+
+        # Retour à la maison à la fin de la saison
+        team_dist += dist_matrix[current_location][team]
+        total_distance += team_dist
+
+    return total_distance
+
+
+if __name__ == "__main__":
+    N_TEAMS = 6
+    teams, dist_matrix = generate_data(N_TEAMS)
+
+    print(f"Villes sélectionnées : {teams}")
