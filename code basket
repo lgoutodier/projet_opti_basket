@@ -1,77 +1,216 @@
 import pulp
-import numpy as np
-import pandas as pd
-import random
 import math
-import time
-
+import random
 
 def generate_data(num_teams):
-    us_cities = [
-        "New York", "Los Angeles", "Chicago", "Houston", "Phoenix",
-        "Philadelphia", "San Antonio", "San Diego", "Dallas", "San Jose"
-    ]
+    us_cities_coords = {
+        "New York": (40.7128, -74.0060),
+        "Los Angeles": (34.0522, -118.2437),
+        "Chicago": (41.8781, -87.6298),
+        "Houston": (29.7604, -95.3698),
+        "Phoenix": (33.4484, -112.0740),
+        "Philadelphia": (39.9526, -75.1652),
+        "San Antonio": (29.4241, -98.4936),
+        "San Diego": (32.7157, -117.1611),
+        "Dallas": (32.7767, -96.7970),
+        "San Jose": (37.3382, -121.8863),
+        "Austin": (30.2672, -97.7431),
+        "Jacksonville": (30.3322, -81.6557),
+        "San Francisco": (37.7749, -122.4194),
+        "Columbus": (39.9612, -82.9988),
+        "Indianapolis": (39.7684, -86.1581),
+        "Fort Worth": (32.7555, -97.3308),
+        "Charlotte": (35.2271, -80.8431),
+        "Seattle": (47.6062, -122.3321),
+        "Denver": (39.7392, -104.9903),
+        "Washington": (38.9072, -77.0369)
+    }
 
-    teams = us_cities[:num_teams]
+    all_cities = list(us_cities_coords.keys())
+    
+    if num_teams > len(all_cities):
+        raise ValueError("Not enough cities provided for the number of teams requested.")
 
-    # On génère des coords aléatoires sur une grille 1000x1000 pour simplifier le calcul de distance
-    coords = {city: (random.randint(0, 1000), random.randint(0, 1000)) for city in teams}
-
-    # Matrice de distance
+    teams = random.sample(all_cities, num_teams)
+    
     dist_matrix = {}
+    R = 6371 
+
     for t1 in teams:
         dist_matrix[t1] = {}
         for t2 in teams:
             if t1 == t2:
                 dist_matrix[t1][t2] = 0
             else:
-                x1, y1 = coords[t1]
-                x2, y2 = coords[t2]
-                d = int(math.sqrt((x1-x2)**2 + (y1 - y2)**2))
+                lat1, lon1 = us_cities_coords[t1]
+                lat2, lon2 = us_cities_coords[t2]
+
+                phi1, phi2 = math.radians(lat1), math.radians(lat2)
+                dphi = math.radians(lat2 - lat1)
+                dlambda = math.radians(lon2 - lon1)
+
+                a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
+                c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+                
+                d = int(R * c)
                 dist_matrix[t1][t2] = d
 
     return teams, dist_matrix
 
+def solve_ttp(teams, dist_matrix, max_consecutive=3, time_limit=300):
+    num_teams = len(teams)
+    num_rounds = 2 * (num_teams - 1)
+    
+    teams_range = range(num_teams)
+    rounds_range = range(num_rounds)
+    
+    prob = pulp.LpProblem("TTP_Optimization", pulp.LpMinimize)
+    
+    x = pulp.LpVariable.dicts(
+        "match",
+        ((i, j, r) for i in teams_range for j in teams_range if i != j for r in rounds_range),
+        cat='Binary'
+    )
 
+    at = pulp.LpVariable.dicts(
+        "at_city",
+        ((i, v, r) for i in teams_range for v in teams_range for r in rounds_range),
+        cat='Binary'
+    )
+    
+    # Correction de la declaration ici pour eviter la KeyError
+    travel_vars = pulp.LpVariable.dicts(
+        "travel",
+        ((i, r) for i in teams_range for r in range(num_rounds + 1)),
+        lowBound=0,
+        cat='Continuous'
+    )
 
-def calculate_total_travel(schedule, teams, dist_matrix):
-    total_distance = 0
+    # Utilisation d'une liste complete pour lpSum
+    prob += pulp.lpSum([travel_vars[i, r] for i in teams_range for r in range(num_rounds + 1)])
 
-    # On suit chaque équipe tour par tour
+    for r in rounds_range:
+        for i in teams_range:
+            prob += (
+                pulp.lpSum([x[i, j, r] for j in teams_range if i != j]) + 
+                pulp.lpSum([x[j, i, r] for j in teams_range if i != j])
+            ) == 1
+
+    for i in teams_range:
+        for j in teams_range:
+            if i != j:
+                prob += pulp.lpSum([x[i, j, r] for r in rounds_range]) == 1
+
+    for r in range(num_rounds - 1):
+        for i in teams_range:
+            for j in teams_range:
+                if i != j:
+                    prob += (x[i, j, r] + x[j, i, r] + x[i, j, r+1] + x[j, i, r+1]) <= 1
+
+    for r in rounds_range:
+        for i in teams_range:
+            prob += at[i, i, r] == pulp.lpSum([x[i, j, r] for j in teams_range if i != j])
+            
+            for v in teams_range:
+                if i != v:
+                    prob += at[i, v, r] == x[v, i, r]
+
+    for i in teams_range:
+        for r in range(num_rounds - max_consecutive):
+            prob += pulp.lpSum([
+                pulp.lpSum([x[i, j, k] for j in teams_range if i != j]) 
+                for k in range(r, r + max_consecutive + 1)
+            ]) <= max_consecutive
+            
+            prob += pulp.lpSum([
+                pulp.lpSum([x[j, i, k] for j in teams_range if i != j])
+                for k in range(r, r + max_consecutive + 1)
+            ]) <= max_consecutive
+
+    for i in teams_range:
+        for v in teams_range:
+            d = dist_matrix[teams[i]][teams[v]]
+            prob += travel_vars[i, 0] >= at[i, v, 0] * d
+
+    for r in range(num_rounds - 1):
+        for i in teams_range:
+            for u in teams_range:
+                for v in teams_range:
+                    d = dist_matrix[teams[u]][teams[v]]
+                    if d > 0:
+                        prob += travel_vars[i, r+1] >= d * (at[i, u, r] + at[i, v, r+1] - 1)
+
+    last_r = num_rounds - 1
+    for i in teams_range:
+        for u in teams_range:
+            d = dist_matrix[teams[u]][teams[i]]
+            prob += travel_vars[i, num_rounds] >= at[i, u, last_r] * d
+
+    solver = pulp.PULP_CBC_CMD(timeLimit=time_limit, msg=1) 
+    prob.solve(solver)
+
+    if pulp.LpStatus[prob.status] != 'Optimal' and pulp.LpStatus[prob.status] != 'Feasible':
+        return None
+
+    schedule = []
+    for r in rounds_range:
+        round_matches = []
+        for i in teams_range:
+            for j in teams_range:
+                if i != j:
+                    if pulp.value(x[i, j, r]) == 1:
+                        round_matches.append((teams[i], teams[j]))
+        schedule.append(round_matches)
+        
+    return schedule
+
+def display_schedule_and_stats(teams, schedule, dist_matrix):
+    print("\n" + "="*40)
+    print("      OPTIMIZED TOURNAMENT SCHEDULE      ")
+    print("="*40)
+
+    for r, matches in enumerate(schedule):
+        print(f"\n--- Round {r + 1} ---")
+        for home, away in matches:
+            print(f"{home:15s} vs {away}")
+
+    print("\n" + "="*40)
+    print("          TEAM TRAVEL STATS              ")
+    print("="*40)
+
+    grand_total = 0
     for team in teams:
-        current_location = team # Au début, l'équipe est à la maison
+        current_loc = team
         team_dist = 0
 
-        for r, matches in enumerate(schedule):
-            # Trouver où joue l'équipe 'team' ce round
-            match = None
-            is_home = False
-
-            for (h, a) in matches:
+        for matches in schedule:
+            match_loc = None
+            for h, a in matches:
                 if h == team:
-                    match = h # Joue à domicile (ville h)
-                    is_home = True
-                    break
+                    match_loc = h
                 elif a == team:
-                    match = a # Joue à l'extérieur (ville a)
-                    is_home = False
-                    break
+                    match_loc = h
 
-            # Calcul du trajet
-            destination = match # La ville où se joue le match
-            d = dist_matrix[current_location][destination]
+            d = dist_matrix[current_loc][match_loc]
             team_dist += d
-            current_location = destination
+            current_loc = match_loc
 
-        # Retour à la maison à la fin de la saison
-        team_dist += dist_matrix[current_location][team]
-        total_distance += team_dist
+        d_return = dist_matrix[current_loc][team]
+        team_dist += d_return
 
-    return total_distance
+        grand_total += team_dist
+        print(f"Team: {team:12s} | Total Distance: {team_dist} km")
 
+    print(f"\nVerified Grand Total: {grand_total} km")
 
 if __name__ == "__main__":
-    N_TEAMS = 6
+    N_TEAMS = 4
+
     teams, dist_matrix = generate_data(N_TEAMS)
 
-    print(f"Villes sélectionnées : {teams}")
+    schedule = solve_ttp(teams, dist_matrix, max_consecutive=3, time_limit=120)
+
+    if schedule:
+        display_schedule_and_stats(teams, schedule, dist_matrix)
+    else:
+        print("No feasible solution found within constraints/time limit.")
